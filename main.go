@@ -1,8 +1,10 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"maps"
@@ -53,15 +55,14 @@ func (t Transfer) String() string {
 		t.Timestamp, t.MessageID, t.From, t.To, attoFILToFIL(t.Amount), t.MinerFee, t.BurnFee)
 }
 
-func attoFILToFIL(atto *big.Int) float64 {
+func attoFILToFIL(atto *big.Int) *big.Float {
 	if atto == nil {
-		return 0
+		return big.NewFloat(0)
 	}
 
 	fil := new(big.Float).SetInt(atto)
 	fil.Quo(fil, new(big.Float).SetInt(attoFIL))
-	f, _ := fil.Float64()
-	return f
+	return fil
 }
 
 func retrieveTransfers(wallet string) ([]APITransferRecord, error) {
@@ -132,7 +133,7 @@ func mungeTransferRecords(records []APITransferRecord) ([]Transfer, error) {
 		if !ok {
 			return nil, fmt.Errorf("Failed to parse amount %s", record.Value)
 		}
-		value = value.Abs(value)
+
 		switch record.Type {
 		case "send", "receive":
 			transfer.Amount = value
@@ -162,6 +163,118 @@ func mungeTransferRecords(records []APITransferRecord) ([]Transfer, error) {
 	return xfers, nil
 }
 
+// Write a Ledger style CSV file
+func writeLedgerCSV(w io.Writer, xfers []Transfer) error {
+	writer := csv.NewWriter(w)
+	defer writer.Flush()
+
+	// Write CSV header
+	headers := []string{
+		"Operation Date",      // Field 1: "Operation Date", as 2024-09-12T16:19:30.000Z format
+		"Status",              // Field 2: "Status" --> hard code to "Confirmed" (for now, can check height later, but not necessary for my use case)
+		"Currency Ticker",     // Field 3: "Currency Ticker" --> hard code to "FIL"
+		"Operation Type",      // Field 4: "Operation Type" --> ["IN" or "OUT"] based on transfer direction
+		"Operation Amount",    // Field 5: "Operation Amount" --> FIL amount transferred, absolute value
+		"Operation Fees",      // Field 6: "Operation Fees" --> miner fee + burn fees, if any
+		"Operation Hash",      // Field 7: "Opearation Hash" --> the message ID
+		"Account Name",        // Field 8: "Account Name" --> hard code to "Filfox API"
+		"Account xpub",        // Field 9: "Account xpub" --> sender or receiver address
+		"Countervalue Ticker", // Field 10: "Countervalue Ticker" --> hard code to "USD"
+		// Field 11: "Countervalue at Operation Date" -> Omitted, we want to import cost basis from another source rather than rely on Filfox's spot exchange rate
+		// Field 12: "Countervalue at CSV Export" -> Omitted, not valuable for this use case
+	}
+	if err := writer.Write(headers); err != nil {
+		return err
+	}
+
+	// Write CSV records
+	for _, xfer := range xfers {
+		// Field 1: Operation Date
+		const iso8601WithMillis = "2006-01-02T15:04:05.000Z"
+		operationDate := xfer.Timestamp.Format(iso8601WithMillis)
+
+		// Field 2: Status
+		status := "Confirmed"
+
+		// Field 3: Currency Type
+		currencyType := "FIL"
+
+		// Field 4: Operation Type and Field 9: Account xpub
+		var operationType, accountXpub string
+		if xfer.Amount.Cmp(big.NewInt(0)) > 0 {
+			operationType = "IN"
+			accountXpub = xfer.To
+		} else {
+			operationType = "OUT"
+			accountXpub = xfer.From
+		}
+		// Field 5: Operation Amount
+		// Needs to be converted to abs value, as Filfox API returns negative values for OUT transactions
+		// On OUT transactions, Ledger add the totalFee to the amount, so we need to calculate the totalFee first
+		totalFee := new(big.Int)
+		if xfer.MinerFee != nil {
+			totalFee.Add(totalFee, xfer.MinerFee)
+		}
+		if xfer.BurnFee != nil {
+			totalFee.Add(totalFee, xfer.BurnFee)
+		}
+
+		var amount *big.Int
+		if operationType == "OUT" {
+			amount = new(big.Int).Add(new(big.Int).Abs(xfer.Amount), new(big.Int).Abs(totalFee))
+		} else {
+			amount = new(big.Int).Abs(xfer.Amount)
+		}
+		// For formatting float64 to here, only use enough precision as necessary, but allow up to 18 digits of precision
+		// operationAmount := fmt.Sprintf("%-1f", attoFILToFIL(amount))
+		//operationAmount := strconv.FormatFloat(attoFILToFIL(amount), 'g', 18, 64)
+		_amount := attoFILToFIL(amount)
+		operationAmount := _amount.Text('f', -1)
+
+		// Field 6: Operation Fee
+		// Calculated in previous field
+		// operationFee := fmt.Sprintf("%f", attoFILToFIL(new(big.Int).Abs(totalFee)))
+		//operationFee := strconv.FormatFloat(attoFILToFIL(new(big.Int).Abs(totalFee)), 'f', -1, 64)
+		_fee := attoFILToFIL(new(big.Int).Abs(totalFee))
+		operationFee := _fee.Text('f', -1)
+
+		// Field 7: Operation Hash
+		operationHash := xfer.MessageID
+
+		// Field 8: Account Name
+		accountName := "Filfox API"
+
+		// Field 9: Account xpub
+		if xfer.Amount.Cmp(big.NewInt(0)) > 0 {
+			accountXpub = xfer.To
+		} else {
+			accountXpub = xfer.From
+		}
+
+		// Field 10: Countervalue Ticker
+		counterValueTicker := "USD"
+
+		record := []string{
+			operationDate,
+			status,
+			currencyType,
+			operationType,
+			operationAmount,
+			operationFee,
+			operationHash,
+			accountName,
+			accountXpub,
+			counterValueTicker,
+		}
+
+		if err := writer.Write(record); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintf(os.Stderr, "Usage: %s <wallet>", os.Args[0])
@@ -188,4 +301,18 @@ func main() {
 	for _, xfer := range xfers {
 		fmt.Println(xfer)
 	}
+
+	outputFileName := fmt.Sprintf("%s.csv", wallet[:9])
+	file, err := os.Create(outputFileName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer file.Close()
+
+	err = writeLedgerCSV(file, xfers)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	log.Printf("Transfers written to %s", outputFileName)
 }
