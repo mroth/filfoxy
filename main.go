@@ -120,7 +120,7 @@ func mungeTransferRecords(records []APITransferRecord) ([]Transfer, error) {
 		transfer, found := transferSet[record.Message]
 		if !found {
 			transfer.Height = record.Height
-			transfer.Timestamp = time.Unix(int64(record.Timestamp), 0)
+			transfer.Timestamp = time.Unix(int64(record.Timestamp), 0).UTC()
 			transfer.MessageID = record.Message
 			transfer.From = record.From
 			transfer.To = record.To
