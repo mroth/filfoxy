@@ -226,15 +226,11 @@ func writeLedgerCSV(w io.Writer, xfers []Transfer) error {
 			amount = new(big.Int).Abs(xfer.Amount)
 		}
 		// For formatting float64 to here, only use enough precision as necessary, but allow up to 18 digits of precision
-		// operationAmount := fmt.Sprintf("%-1f", attoFILToFIL(amount))
-		//operationAmount := strconv.FormatFloat(attoFILToFIL(amount), 'g', 18, 64)
 		_amount := attoFILToFIL(amount)
 		operationAmount := _amount.Text('f', -1)
 
 		// Field 6: Operation Fee
 		// Calculated in previous field
-		// operationFee := fmt.Sprintf("%f", attoFILToFIL(new(big.Int).Abs(totalFee)))
-		//operationFee := strconv.FormatFloat(attoFILToFIL(new(big.Int).Abs(totalFee)), 'f', -1, 64)
 		_fee := attoFILToFIL(new(big.Int).Abs(totalFee))
 		operationFee := _fee.Text('f', -1)
 
